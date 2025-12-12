@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"runtime"
+	"fmt"
 	"time"
 
 	"github.com/ajeetraina/genai-app-demo/pkg/metrics"

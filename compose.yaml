@@ -16,6 +16,7 @@ services:
       - app-network
     depends_on:
       - llm
+      - llm-fast
 
   frontend:
     build:
@@ -76,6 +77,12 @@ services:
       type: model
       options:
         model: ${LLM_MODEL_NAME:-ai/llama3.2:1B-Q8_0}
+  
+  llm-fast:
+    provider:
+      type: model
+      options:
+        model: ai/llama3.2:1B-Q4_0
 
 volumes:
   grafana-data:

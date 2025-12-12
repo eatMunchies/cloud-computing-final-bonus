@@ -1,5 +1,5 @@
 package main
-
+// should work
 import (
 	"context"
 	"encoding/json"
@@ -36,6 +36,7 @@ type ChatRequest struct {
 	Messages []Message `json:"messages"`
 	Message  string    `json:"message"`
 	Format   string    `json:"format,omitempty"` // Optional format parameter
+	Model	 string    `json:"model,omitempty"`
 }
 
 type MetricLog struct {
@@ -99,7 +100,7 @@ var (
 			Name: "genai_app_chat_tokens_total",
 			Help: "Total number of tokens processed in chat",
 		},
-		[]string{"direction", "model"},
+		[]string{"direction", "model", "alias"},
 	)
 	
 	modelLatency = promautoFactory.NewHistogramVec(
@@ -108,7 +109,7 @@ var (
 			Help:    "Model response time in seconds",
 			Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 20, 30, 60},
 		},
-		[]string{"model", "operation"},
+		[]string{"model", "operation", "alias"},
 	)
 	
 	activeRequests = promautoFactory.NewGauge(
@@ -134,7 +135,7 @@ var (
 			Help:    "Time to first token in seconds",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5},
 		},
-		[]string{"model"},
+		[]string{"model", "alias"},
 	)
 
 	// LlamaCpp metrics
@@ -143,7 +144,7 @@ var (
 			Name: "genai_app_llamacpp_context_size",
 			Help: "Context window size in tokens for llama.cpp models",
 		},
-		[]string{"model"},
+		[]string{"model", "alias"},
 	)
 
 	llamacppPromptEvalTime = promautoFactory.NewHistogramVec(
@@ -152,7 +153,7 @@ var (
 			Help:    "Time spent evaluating the prompt in seconds",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10},
 		},
-		[]string{"model"},
+		[]string{"model", "alias"},
 	)
 
 	llamacppTokensPerSecond = promautoFactory.NewGaugeVec(
@@ -160,7 +161,7 @@ var (
 			Name: "genai_app_llamacpp_tokens_per_second",
 			Help: "Tokens generated per second",
 		},
-		[]string{"model"},
+		[]string{"model", "alias"},
 	)
 
 	llamacppMemoryPerToken = promautoFactory.NewGaugeVec(
@@ -168,7 +169,7 @@ var (
 			Name: "genai_app_llamacpp_memory_per_token_bytes",
 			Help: "Memory usage per token in bytes",
 		},
-		[]string{"model"},
+		[]string{"model", "alias"},
 	)
 
 	llamacppThreadsUsed = promautoFactory.NewGaugeVec(
@@ -176,7 +177,7 @@ var (
 			Name: "genai_app_llamacpp_threads_used",
 			Help: "Number of threads used for inference",
 		},
-		[]string{"model"},
+		[]string{"model", "alias"},
 	)
 
 	llamacppBatchSize = promautoFactory.NewGaugeVec(
@@ -184,7 +185,7 @@ var (
 			Name: "genai_app_llamacpp_batch_size",
 			Help: "Batch size used for inference",
 		},
-		[]string{"model"},
+		[]string{"model", "alias"},
 	)
 )
 
@@ -316,7 +317,20 @@ func main() {
 	// Get configuration from environment
 	baseURL := os.Getenv("BASE_URL")
 	model := os.Getenv("MODEL")
+	
 	apiKey := os.Getenv("API_KEY")
+	
+	modelMap := map[string]string {
+		"fast": os.Getenv("MODEL_FAST"),
+		"accurate": os.Getenv("MODEL_ACCURATE"),
+	}
+	defaultModelAlias := os.Getenv("DEFAULT_MODEL_ALIAS")
+	
+	// see which model to use
+	if _, ok := modelMap[defaultModelAlias]; !ok {
+        log.Printf("Warning: DEFAULT_MODEL_ALIAS '%s' not found in config. Defaulting to 'fast'.", defaultModelAlias)
+        defaultModelAlias = "fast"
+    }
 
 	// Tracing setup
 	tracingEnabled, _ := strconv.ParseBool(getEnvOrDefault("TRACING_ENABLED", "false"))
@@ -369,44 +383,63 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.WriteHeader(http.StatusOK)
+
+		requestedAlias := r.URL.Query().Get("model")
+
+		if requestedAlias == "" {
+			requestedAlias = defaultModelAlias
+		}
+
+		fullModelID, exists := modelMap[requestedAlias]
+		if !exists {
+			requestedAlias = defaultModelAlias
+			fullModelID = modelMap[defaultModelAlias]
+		}
 		
 		// Check if the model is a llama.cpp model
-		isLlamaCpp := strings.Contains(strings.ToLower(model), "llama") || 
+		isLlamaCpp := strings.Contains(strings.ToLower(fullModelID), "llama") || 
 			            strings.Contains(baseURL, "llama.cpp")
 		
 		// Add model information to the health response
-		modelInfo := map[string]interface{}{
-			"model": model,
-		}
+		// modelInfo := map[string]interface{}{
+		// 	"model": model,
+		// }
 		
 		// Add context window size if available
-		if isLlamaCpp {
-			modelInfo["modelType"] = "llama.cpp"
-			contextSize := int(getGaugeValueWithLabels(llamacppContextSize, model))
-			if contextSize > 0 {
-				modelInfo["contextWindow"] = contextSize
-			} else {
-				// Default context window for the model if not set yet
-				if strings.Contains(model, "1B") {
-					modelInfo["contextWindow"] = 2048
-				} else if strings.Contains(model, "7B") {
-					modelInfo["contextWindow"] = 4096
-				} else if strings.Contains(model, "13B") {
-					modelInfo["contextWindow"] = 4096
-				} else if strings.Contains(model, "70B") {
-					modelInfo["contextWindow"] = 8192 
-				} else {
-					modelInfo["contextWindow"] = 4096 // Default
-				}
-			}
-		}
+		contextWindow := 4096 // Safe default
+        if isLlamaCpp {
+            // Try to get actual metric first
+            metricSize := int(getGaugeValueWithLabels(llamacppContextSize, fullModelID))
+            if metricSize > 0 {
+                contextWindow = metricSize
+            } else {
+                // Fallback heuristics based on model string
+                if strings.Contains(fullModelID, "1B") {
+                    contextWindow = 2048
+                } else if strings.Contains(fullModelID, "7B") {
+                    contextWindow = 4096
+                } else if strings.Contains(fullModelID, "70B") {
+                    contextWindow = 8192 
+                }
+            }
+        }
 		
+		modelType := "openai-compatible"
+		if isLlamaCpp {
+			modelType = "llama.cpp"
+		}
+
 		response := map[string]interface{}{
 			"status": "ok",
-			"model_info": modelInfo,
+			"model_info": map[string]interface{}{
+				"alias": requestedAlias,
+				"model": fullModelID,
+				"modelType": modelType,
+				"contextWindow": contextWindow,
+			},
 		}
-		
+
+		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(response)
 	})
 
@@ -527,7 +560,7 @@ func main() {
 	})
 
 	// Add chat endpoint with advanced tracing
-	mux.HandleFunc("/chat", handleChat(client, model, baseURL))
+	mux.HandleFunc("/chat", handleChat(client, modelMap, defaultModelAlias, baseURL))
 
 	// Create HTTP server
 	server := &http.Server{
@@ -589,7 +622,7 @@ func getEnvOrDefault(key, defaultValue string) string {
 }
 
 // handleChat handles the chat endpoint with simple tracing
-func handleChat(client *openai.Client, model string, apiBaseURL string) http.HandlerFunc {
+func handleChat(client *openai.Client, modelMap map[string]string, defaultAlias string, apiBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -613,6 +646,19 @@ func handleChat(client *openai.Client, model string, apiBaseURL string) http.Han
 			return
 		}
 
+		requestedAlias := req.Model
+        if requestedAlias == "" {
+            requestedAlias = defaultAlias
+        }
+
+		modelID, exists := modelMap[requestedAlias]
+		if !exists {
+			log.Printf("Requested model alias '%s' not found. Falling back to default.", requestedAlias)
+			modelID = modelMap[defaultAlias]
+		}
+
+		log.Printf("Using model: %s", modelID)
+
 		// Set headers for SSE
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -627,7 +673,7 @@ func handleChat(client *openai.Client, model string, apiBaseURL string) http.Han
 		inputTokens += len(req.Message) / 4
 		
 		// Track metrics for input tokens
-		chatTokensCounter.WithLabelValues("input", model).Add(float64(inputTokens))
+		chatTokensCounter.WithLabelValues("input", modelID, requestedAlias).Add(float64(inputTokens))
 
 		// Start model timing
 		start := time.Now()
@@ -675,7 +721,7 @@ func handleChat(client *openai.Client, model string, apiBaseURL string) http.Han
 		
 		param := openai.ChatCompletionNewParams{
 			Messages: openai.F(messages),
-			Model:    openai.F(model),
+			Model:    openai.F(modelID),
 		}
 
 		// Set prompt evaluation start time for llama.cpp metrics
@@ -692,10 +738,10 @@ func handleChat(client *openai.Client, model string, apiBaseURL string) http.Han
 				firstTokenTime = time.Now()
 				
 				// For llama.cpp, record prompt evaluation time
-				if strings.Contains(strings.ToLower(model), "llama") || 
+				if strings.Contains(strings.ToLower(modelID), "llama") || 
 				   strings.Contains(apiBaseURL, "llama.cpp") {
 					promptEvalTime := firstTokenTime.Sub(promptEvalStartTime)
-					llamacppPromptEvalTime.WithLabelValues(model).Observe(promptEvalTime.Seconds())
+					llamacppPromptEvalTime.WithLabelValues(modelID, requestedAlias).Observe(promptEvalTime.Seconds())
 				}
 			}
 
@@ -712,25 +758,25 @@ func handleChat(client *openai.Client, model string, apiBaseURL string) http.Han
 		}
 
 		// Calculate tokens per second for llama.cpp metrics
-		if strings.Contains(strings.ToLower(model), "llama") || 
+		if strings.Contains(strings.ToLower(modelID), "llama") || 
 		   strings.Contains(apiBaseURL, "llama.cpp") {
 			totalTime := time.Since(firstTokenTime).Seconds()
 			if totalTime > 0 && outputTokens > 0 {
 				tokensPerSecond := float64(outputTokens) / totalTime
-				llamacppTokensPerSecond.WithLabelValues(model).Set(tokensPerSecond)
+				llamacppTokensPerSecond.WithLabelValues(modelID, requestedAlias).Set(tokensPerSecond)
 			}
 		}
 
 		// Record metrics
 		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(time.Since(start).Seconds())
 		requestCounter.WithLabelValues(r.Method, r.URL.Path, "200").Inc()
-		chatTokensCounter.WithLabelValues("output", model).Add(float64(outputTokens))
-		modelLatency.WithLabelValues(model, "inference").Observe(time.Since(modelStartTime).Seconds())
+		chatTokensCounter.WithLabelValues("output", modelID, requestedAlias).Add(float64(outputTokens))
+		modelLatency.WithLabelValues(modelID, "inference", requestedAlias).Observe(time.Since(modelStartTime).Seconds())
 		
 		if !firstTokenTime.IsZero() {
 			ttft := firstTokenTime.Sub(modelStartTime).Seconds()
 			log.Printf("Time to first token: %.3f seconds", ttft)
-			firstTokenLatency.WithLabelValues(model).Observe(ttft)
+			firstTokenLatency.WithLabelValues(modelID, requestedAlias).Observe(ttft)
 		}
 
 		if err := stream.Err(); err != nil {

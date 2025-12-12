@@ -5,6 +5,11 @@ import { MessageInput } from './MessageInput';
 import { SimplifiedMetrics } from './SimplifiedMetrics';
 import { ModelInfoCard } from './ModelInfoCard';
 
+enum ModelType {
+  Fast = "fast",
+  Accurate = "accurate"
+}
+
 export default function ChatBox() {
   const [input, setInput] = useState('');
   const [isLoading, setLoading] = useState(false);
@@ -14,6 +19,7 @@ export default function ChatBox() {
   const [showModelInfo, setShowModelInfo] = useState(false); // Toggle for model info panel
   const [messageMetrics, setMessageMetrics] = useState<Record<string, MessageMetrics>>({});
   const [modelInfo, setModelInfo] = useState<ModelMetadata | null>(null);
+  const [currentModel, setCurrentModel] = useState<ModelType>(ModelType.Accurate);
 
   // Load messages from local storage on initial render
   useEffect(() => {
@@ -28,7 +34,7 @@ export default function ChatBox() {
 
     // Fetch model information
     fetchModelInfo();
-  }, []);
+  }, [currentModel]);
 
   // Save messages to local storage when they change
   useEffect(() => {
@@ -37,7 +43,7 @@ export default function ChatBox() {
 
   const fetchModelInfo = async () => {
     try {
-      const response = await fetch('http://localhost:8080/health');
+      const response = await fetch(`http://localhost:8080/health?model=${currentModel}`);
       if (response.ok) {
         const data = await response.json();
         if (data.model_info) {
@@ -90,7 +96,7 @@ export default function ChatBox() {
       const response = await fetch('http://localhost:8080/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: currentInput, messages: messages }),
+        body: JSON.stringify({ message: currentInput, messages: messages, model: currentModel }),
       });
 
       if (response.status !== 200) {
@@ -254,6 +260,22 @@ export default function ChatBox() {
     <div className="flex flex-col w-full max-w-3xl mx-auto h-[calc(100vh-180px)] rounded-lg shadow-lg border dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden transition-colors duration-200">
       <div className="flex items-center justify-between p-3 border-b dark:border-gray-800">
         <div className="flex items-center space-x-2">
+          <div className="relative">
+            <select
+              value={currentModel}
+              onChange={(e) => setCurrentModel(e.target.value as ModelType)}
+              className="appearance-none bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 py-1 pl-3 pr-8 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value={ModelType.Fast}>Fast</option>
+              <option value={ModelType.Accurate}>Accurate</option>
+            </select>
+            <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-700 dark:text-gray-200">
+              <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+                <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/>
+              </svg>
+            </div>
+          </div>
+
           {modelInfo ? (
             <div className="flex items-center cursor-pointer" onClick={toggleModelInfo}>
               <ModelInfoCard modelInfo={modelInfo} isMinimized={true} />
@@ -262,8 +284,9 @@ export default function ChatBox() {
               </svg>
             </div>
           ) : (
-            <h2 className="text-lg font-semibold">Chat</h2>
+            <h2 className="text-lg font-semibold hidden sm:block">Chat</h2>
           )}
+        </div>
         </div>
         <div className="flex space-x-2">
           <button
@@ -283,7 +306,6 @@ export default function ChatBox() {
             </button>
           )}
         </div>
-      </div>
       
       {/* Show model info card when expanded */}
       {showModelInfo && modelInfo && (
